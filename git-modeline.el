@@ -7,8 +7,7 @@
 
 ;; Modeline decoration customization
 (defcustom git-state-modeline-decoration
-  (if window-system 'git-state-decoration-large-dot
-                    'git-state-decoration-colored-letter)
+  'git-state-decoration-letter
   "How to indicate the status of files in the modeline. The value
 must be a function that takes a single arg: a symbol denoting file status,
 e.g. 'unmerged. The return value of the function will be added at the beginning
@@ -29,7 +28,7 @@ of mode-line-format."
 ;; Modeline decoration options
 (defun git-state-decoration-small-dot(stat)
   (git--state-mark-modeline-dot
-   (git--interpret-state-mode-color stat)
+   (git--interpret-state-mode-color stat) stat
 "/* XPM */
 static char * data[] = {
 \"14 7 3 1\",
@@ -46,7 +45,7 @@ static char * data[] = {
 
 (defun git-state-decoration-large-dot(stat)
   (git--state-mark-modeline-dot
-   (git--interpret-state-mode-color stat)
+   (git--interpret-state-mode-color stat) stat
 "/* XPM */
 static char * data[] = {
 \"18 13 3 1\",
@@ -78,10 +77,13 @@ static char * data[] = {
      ('staged   "S")
      (t "")))
 
+(defsubst git--state-mark-tooltip(stat)
+  (format "File status in git: %s" stat))
+
 (defun git-state-decoration-letter(stat)
   (propertize
    (concat (git--interpret-state-mode-letter stat) " ")
-   'help-echo 'git--state-mark-tooltip))
+   'help-echo (git--state-mark-tooltip stat)))
 
 (defun git-state-decoration-colored-letter(stat)
   (propertize
@@ -90,15 +92,14 @@ static char * data[] = {
      (git--interpret-state-mode-letter stat)
      'face (list ':foreground (git--interpret-state-mode-color stat)))
     " ")
-   'help-echo 'git--state-mark-tooltip))
+   'help-echo (git--state-mark-tooltip stat)))
 
 ;; Modeline decoration implementation
 (defvar git--state-mark-modeline t)     ; marker for our entry in mode-line-fmt
-(defvar git--state-mark-tooltip nil)    ; modeline tooltip display
 
-(defun git--state-mark-modeline-dot (color img)
+(defun git--state-mark-modeline-dot (color stat img)
   (propertize "    "
-              'help-echo 'git--state-mark-tooltip
+              'help-echo (git--state-mark-tooltip stat)
               'display
               `(image :type xpm
                       :data ,(format img color)
@@ -122,9 +123,6 @@ static char * data[] = {
                                 mode))
                    mode-line-format)))
   )
-
-(defun git--update-state-mark-tooltip (tooltip)
-  (setq git--state-mark-tooltip tooltip))
 
 ;; autoload entry point
 (defun git--update-state-mark (stat)
@@ -179,7 +177,6 @@ doing update--state-mark for each buffer."
 ;; 
 ;;(git--install-state-mark-modeline 'modified)
 ;; (git--uninstall-state-mark-modeline)
-;; (setq git--state-mark-tooltip "testsetset")
 ;; (git--update-all-state-marks)
 
 (provide 'git-modeline)

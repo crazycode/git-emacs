@@ -757,10 +757,11 @@ only checks the specified files. The list is sorted by filename."
     (sort fileinfo 'git--fileinfo-lessp)))
 
 (defsubst git--to-type-sym (type)
-  "Change string symbol type to 'blob or 'tree"
+  "Change string symbol type to 'blob, 'tree or 'commit (i.e. submodule)"
   
   (cond ((string= type "blob") 'blob)
         ((string= type "tree") 'tree)
+        ((string= type "commit") 'commit)
         (t (error "strange type : %s" type))))
 
 (defun git--ls-tree (&rest args)
@@ -1268,8 +1269,10 @@ prompts for resolving the next one. If all conflicts have been resolved, pulls
 up a commit buffer. The function continues with the above logic until either
 the user quits or the merge is successfully committed."
   (interactive)
-  ;; First, check for any unmerged files
-  (let ((unmerged-files (git--ls-unmerged)))
+  ;; First, check for any unmerged files. We must go to the top every time,
+  ;; because the default-dir might change on us.
+  (let* ((default-directory (git--get-top-dir))
+         (unmerged-files (git--ls-unmerged)))
     (if unmerged-files
         (progn
           (switch-to-buffer
@@ -1300,8 +1303,7 @@ the user quits or the merge is successfully committed."
 
       ;; else branch, no unmerged files remaining
       ;; Perhaps we should commit (staged files only!)
-      (if (file-exists-p (expand-file-name ".git/MERGE_HEAD"
-                                           (git--get-top-dir)))
+      (if (file-exists-p (expand-file-name ".git/MERGE_HEAD"))
           (git-commit nil nil "Merge finished. ")    ; And we're done!
         ;; else branch, no sign of a merge. Ask for another.
         (if (git--merge-ask)
