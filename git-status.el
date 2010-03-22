@@ -29,11 +29,13 @@
 (defun git--refresh-desc ()
   "Refresh the git-status-mode header description"
   
-  (ewoc-set-hf git--status-view
-               (concat (git--bold-face "Directory") " : " default-directory     "\n"
-                       (git--bold-face "Branch   ") " : " (git--current-branch) "\n"
-                       (git--bold-face "Last Log ") " : " (git--last-log-short) "\n")
-               ""))
+  (ewoc-set-hf
+   git--status-view
+   (concat (git--bold-face "Directory") " : " default-directory     "\n"
+           (git--bold-face "Branch   ") " : "
+           (or (git--current-branch) "<none>") "\n"
+           (git--bold-face "Last Log ") " : " (git--last-log-short) "\n")
+   ""))
 
 (defsubst git--status-buffer-name (dir)
   (format "*git-status on %s*" (abbreviate-file-name (expand-file-name dir))))
@@ -55,7 +57,7 @@
      '((((class color) (background light)) (:foreground ,fore1 ,@prop1))
        (((class color) (background dark))  (:foreground ,fore2 ,@prop2)))
     ,(concat "git " (symbol-name name) " face in status buffer mode")
-    :group 'git))
+    :group 'git-emacs-faces))
 
 (git--face mark       "red"    (:bold t) "tomato"  (:bold t))
 (git--face mark-tree  "blue"   (:bold t) "yellow"  (:bold t))
@@ -148,7 +150,7 @@ to ls -sh; e.g. 29152 -> 28K."
                    ('tree 'git--mark-tree-face)
                    ('blob 'git--mark-blob-face)
                    ('commit 'git--mark-submodule-face)
-                   (t (error "Can't be!")))))))
+                   (t (error "Unknown node type: %S" type)))))))
                   
 (defun git--render-file-status (info)
   "Render status view node, call in order
@@ -196,16 +198,31 @@ to ls -sh; e.g. 29152 -> 28K."
 (defun git-status-mode-revert-buffer (ignore-auto noconfirm)
   "Refresh status information."
 
-  ;; TODO refresh status-mode-buffer
-  (git--status-new)
-  (git--status-view-first-line))
-
+  (let* ((current-node (ewoc-locate git--status-view))
+         (current-fi (when current-node (ewoc-data current-node)))
+         new-current)
+    (git--please-wait "Reading git status" (git--status-new))
+    (when current-fi
+      (git--status-view-update-expand-tree (list current-fi) t)
+      (setq new-current
+            (git--status-map (ewoc-nth git--status-view 0)
+                             (lambda (node data)
+                               (or (string= (git--fileinfo->name data)
+                                            (git--fileinfo->name current-fi))
+                                   (git--fileinfo-lessp current-fi data))))))
+    (if (not new-current)
+        (git--status-view-first-line)
+      (ewoc-goto-node git--status-view new-current)
+      (move-to-column git--status-line-column))))
+      
 
 ;; autoloaded entry point
 (defun git-status (dir)
-  "Launch git-status-mode on the specified directory."
+  "Launch git-status-mode on the specified directory. With a prefix
+argument (C-u), always prompts."
 
-  (interactive (list (git--get-top-dir-or-prompt "Select directory: ")))
+  (interactive (list (git--get-top-dir-or-prompt
+                      "Select directory: " (when current-prefix-arg t))))
 
   (setq dir (git--get-top-dir dir))
   (if (file-directory-p (git--expand-to-repository-dir dir))
@@ -234,8 +251,9 @@ to ls -sh; e.g. 29152 -> 28K."
 
 (defsubst git--status-map (node pred)
   "Iterating 'git--status-view' by using 'ewoc-next and return the next node.
-The predicate function should get 'node and 'data arguments and it return 't or nil.
-If predicate return nil continue to scan, otherwise stop and return the node"
+The predicate function should get 'node and 'data arguments and
+it should return t or nil.  If predicate returned nil we continue to scan,
+otherwise stop and return the node."
   
   (let ((data nil)
         (cont t))
@@ -243,7 +261,7 @@ If predicate return nil continue to scan, otherwise stop and return the node"
     (while (and node cont)
       (setq data (ewoc-data node))
       (setq cont (not (funcall pred node data)))
-      (setq node (ewoc-next git--status-view node)))
+      (when cont (setq node (ewoc-next git--status-view node))))
 
     node))
 
@@ -275,41 +293,81 @@ If predicate return nil continue to scan, otherwise stop and return the node"
 
     (maphash #'(lambda (k v) (git--status-view-dumb-update-element v)) hashed-info)))
 
-;; TODO : need refactoring
-(defun git--status-view-update-expand-tree (fileinfo)
-  "Expand the interesting tree nodes containing one of fileinfos"
+(defun git--status-view-update-expand-tree (fileinfos
+                                            &optional dont-add-unknown-dirs)
+  "Expand the tree nodes containing one of FILEINFOS, which must be sorted.
+Does not add unknown files within the expanded dirs, that must be
+an additional merge step. If DONT-ADD-UNKNOWN-DIRS is specified,
+does not add additional directories to accommodate fileinfos that
+are very deep (used when repositioning mark on refresh)."
+  (let ((node (ewoc-nth git--status-view 0))
+        (last-path-expanded '()))
+    (dolist (fi fileinfos)
+      (let* ((components (nbutlast
+                          (split-string (git--fileinfo->name fi) "/")))
+             (paths-to-expand components) ; advancing pointer inside components
+             (matched-name nil) (cont-iteration t))
 
-  (let ((node (ewoc-nth git--status-view 0)))
-    
-    (dolist (fi fileinfo)
-      (let* ((paths (split-string (git--fileinfo->name fi) "/"))
-             (matched-name nil))
+        (while (and paths-to-expand last-path-expanded
+                    (string= (car paths-to-expand) (car last-path-expanded)))
+          (setq paths-to-expand (cdr paths-to-expand))
+          (setq last-path-expanded (cdr last-path-expanded)))
 
-        (when (< 1 (length paths))
-
-          (setq matched-name (car paths))
-          (setq paths (cdr paths))
-
-          (setq node (git--status-map node
-                                      (lambda (cur-node data)
-                                        (when (and (eq (git--fileinfo->type data) 'tree)
-                                                   (string= (git--fileinfo->name data) matched-name))
-
-                                          (git--expand-tree cur-node)
-                                          (if paths
-                                              (progn
-                                                (setq matched-name (concat matched-name "/" (car paths)))
-                                                (setq paths (cdr paths))
-                                                nil)
-                                            t))))))))))
+        (setq last-path-expanded components)
+        
+        ;; Paths inside root or an expanded path are already handled.
+        (when paths-to-expand
+          (let ((remaining-paths (cdr paths-to-expand)))
+            (setcdr paths-to-expand nil)          ; splice off beginning path
+            (setq matched-name (git--join components "/"))
+            (setcdr paths-to-expand remaining-paths) ; relink last-path-expanded
+            (setq paths-to-expand remaining-paths))
+          
+          (while cont-iteration
+            (let ((data (ewoc-data node)) (found-it nil))
+              (if (and (git--fileinfo-is-dir data)
+                       (string= (git--fileinfo->name data) matched-name))
+                  (progn
+                    (unless (git--fileinfo->expanded data)
+                      (git--expand-tree node t))
+                    (setq found-it t))
+                ;; Have we passed our insertion point? This can happen when
+                ;; merging unknown files in unknown subdirs.
+                (when (git--fileinfo-lessp fi data)
+                  (if dont-add-unknown-dirs
+                      (setq cont-iteration nil)
+                    ;; Add the subdir we were looking for here. Don't advance.
+                    (setq node (ewoc-enter-before
+                                git--status-view node
+                                (git--create-fileinfo
+                                 matched-name 'tree nil nil nil 'unknown)))
+                    ;; This new node is being expanded as we speak.
+                    (setf (git--fileinfo->expanded (ewoc-data node)) t)
+                    (setq found-it t))))
+              (if found-it
+                  ;; Do we need to expand even lower?
+                  (if paths-to-expand
+                    (progn
+                      (setq matched-name
+                            (concat matched-name "/"
+                                    (car paths-to-expand)))
+                      (setq paths-to-expand (cdr paths-to-expand))
+                      ;; Continue iteration from next node
+                      (setq node (ewoc-next git--status-view node)))
+                    (setq cont-iteration nil))   ;; No, stop at this node.
+                (setq node (ewoc-next git--status-view node))) ;; advance
+              ))
+          ;; This was very useful while debugging. Please leave it in.
+          ;; (message "node: %s paths-to-expand %S matched-name %S fi-name %S" (when node (git--fileinfo->name (ewoc-data node))) paths-to-expand matched-name (git--fileinfo->name fi))
+          )))))
                                           
 
 (defun git--status-view-update ()
   "Friendly update view function"
   
-  (let ((fileinfo (git--status-index)))
-    (git--status-view-update-expand-tree fileinfo)
-    (git--status-view-update-state fileinfo)))
+  (let ((fileinfos (sort (git--status-index) #'git--fileinfo-lessp)))
+    (git--status-view-update-expand-tree fileinfos)
+    (git--status-view-update-state fileinfos)))
 
 (defsubst git--status-refresh ()
   (let ((pos (point)))
@@ -340,12 +398,21 @@ If predicate return nil continue to scan, otherwise stop and return the node"
   (let ((fileinfo (git--ls-files "-o" "--exclude-standard")))
     (git--status-view-update-expand-tree fileinfo)
 
+    ;; Use the file sorting to merge into the list.
     (let ((iter (ewoc-nth git--status-view 0)))
       (dolist (fi fileinfo)
         (git--status-add-size fi)
-        (setq iter (git--status-map iter (lambda (node data)
-                                           (when (git--fileinfo-lessp fi data)
-                                             (ewoc-enter-before git--status-view node fi))))))))
+        ;; Find the lowest node that's larger, or enter at the end.
+        (let (enter-before)
+          (git--status-map
+           iter
+           (lambda (node data)
+             (when (git--fileinfo-lessp fi data)
+               (setq enter-before node))))
+          (if enter-before
+              (setq iter (ewoc-enter-before git--status-view enter-before fi))
+            (setq iter (ewoc-enter-last git--status-view fi)))))))
+
   (git--status-refresh))
 
 (defsubst git--status-delete (node)
@@ -353,7 +420,7 @@ If predicate return nil continue to scan, otherwise stop and return the node"
   (let ((buffer-read-only nil)) 
     (ewoc-delete git--status-view node)))
 
-(defun git--status-delete-afer-regex (node regex)
+(defun git--status-delete-after-regex (node regex)
   (while node
     (let ((next-node (ewoc-next git--status-view node))
           (node-data (ewoc-data node)))
@@ -415,7 +482,7 @@ If predicate return nil continue to scan, otherwise stop and return the node"
 
 (easy-menu-define gitemacs-menu git-status-mode-map
   "Git"
-  `("Emacs-Git"
+  `("Git-Emacs"
     ["Refresh" git--status-view-refresh t]
     ["First Line" git--status-view-first-line t]
     ["Last Line" git--status-view-last-line t]
@@ -469,30 +536,65 @@ If predicate return nil continue to scan, otherwise stop and return the node"
 ;; status view tree expanding
 ;;-----------------------------------------------------------------------------
 
-(defun git--expand-tree (node)
-  "Expand 'node' in 'git--status-view', but node->type should be 'tree"
+(defun git--expand-tree (node &optional dont-add-unknown)
+  "Expand 'node' in 'git--status-view'.  node->type should be 'tree. If
+DONT-ADD-UNKOWN is true, does not add unknown files (if we're about to merge
+them)."
 
   (let* ((data (ewoc-data node))
          (name (git--fileinfo->name data))
          (type (git--fileinfo->type data))
-         (fileinfo (git--ls-tree (git--fileinfo->sha1 data))))
+         (tree-sha1 (git--fileinfo->sha1 data))
+         ;; We need some duplicate removal later on. Hashtable? not now.
+         (known-subdirs '())
+         (massage-fileinfo
+          (lambda (fi)
+            (let ((subfname (git--fileinfo->name fi)))
+              (setf (git--fileinfo->name fi)
+                    (git--concat-path-only name subfname))
+              (when (git--fileinfo-is-dir fi) (push subfname known-subdirs)))
+            fi))
+         ;; The node may or may not be in git (e.g. unknown files onl)
+         (fileinfos
+          (sort (append
+                 (when tree-sha1
+                   (let ((fileinfos (git--ls-tree tree-sha1)))
+                     (mapc massage-fileinfo fileinfos) ; modify them
+                     fileinfos))
+                 ;; Add unknown files, but just at the top-level. Note
+                 ;; that git would give them to us *with* name, if we
+                 ;; didn't cd.
+                 (unless dont-add-unknown
+                   (let ((unknown-files
+                          (let ((default-directory
+                                  (concat default-directory "/"
+                                          (file-name-as-directory name))))
+                            (git--ls-files "-o" "--exclude-standard")))
+                         (filtered-unknown '()))
+                     (dolist (fi unknown-files)
+                       (let* ((subfname (git--fileinfo->name fi))
+                              (components (split-string subfname "/" t)))
+                         (if (eq 1 (length components))
+                             (push (funcall massage-fileinfo fi)
+                                   filtered-unknown)
+                           ;; insert just the first component, if not seen
+                           (unless (member (car components) known-subdirs)
+                             (push
+                              (funcall massage-fileinfo
+                                       (git--create-fileinfo
+                                        (car components)
+                                        'tree nil nil nil 'unknown))
+                              filtered-unknown)))))
+                     filtered-unknown)))
+                 #'git--fileinfo-lessp)))
 
     (unless (eq type 'tree) (error "type should be 'tree"))
 
     (unless (git--fileinfo->expanded data)
 
-      (dolist (fi fileinfo)
-        (let ((fi-name (git--fileinfo->name fi)))
-          ;; update fileinfo name as "path/name"
-          (setf (git--fileinfo->name fi)
-                (git--concat-path-only name fi-name))
-
-          ;; update lessp by force
-          (setf (git--fileinfo->lessp fi) 2)
-
-          (git--status-add-size fi)
-
-          (setq node (ewoc-enter-after git--status-view node fi))))
+      (dolist (fi fileinfos)
+        (git--status-add-size fi)
+        (setq node (ewoc-enter-after git--status-view node fi)))
     
       (setf (git--fileinfo->expanded data) t))))
 
@@ -500,15 +602,15 @@ If predicate return nil continue to scan, otherwise stop and return the node"
   "Shrink 'node' in 'git--status-view', but node->type should be 'tree"
   
   (let* ((data (ewoc-data node))
-         (type (git--fileinfo->type data))
          (name (git--fileinfo->name data)))
 
-    (unless (eq type 'tree) (error "type should be 'tree"))
+    (unless (git--fileinfo-is-dir data) (error "type should be 'tree"))
   
     (when (git--fileinfo->expanded data)
       ;; make regexp "node->name/"
-      (git--status-delete-afer-regex (ewoc-next git--status-view node)
-                                     (file-name-as-directory name))
+      (git--status-delete-after-regex
+       (ewoc-next git--status-view node)
+       (concat "^" (regexp-quote (file-name-as-directory name))))
       (setf (git--fileinfo->expanded data) nil))))
 
 
